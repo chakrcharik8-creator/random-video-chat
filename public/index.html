@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>شات فيديو عشوائي</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0f0f1a;
+    font-family: Arial, sans-serif;
+    color: white;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-height: 100vh;
+    padding: 10px;
+  }
+  h1 { margin: 10px 0; font-size: 20px; }
+  .videos {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    width: 100%;
+    max-width: 500px;
+  }
+  video {
+    width: 100%;
+    background: #1a1a2e;
+    border-radius: 12px;
+  }
+  #remoteVideo { height: 300px; object-fit: cover; }
+  #localVideo { height: 150px; object-fit: cover; }
+  .status {
+    margin: 15px 0;
+    padding: 8px 16px;
+    background: #1a1a2e;
+    border-radius: 20px;
+    font-size: 14px;
+  }
+  .controls { display: flex; gap: 10px; margin-top: 15px; }
+  button {
+    padding: 12px 24px;
+    border: none;
+    border-radius: 25px;
+    font-size: 16px;
+    font-weight: bold;
+    cursor: pointer;
+  }
+  #startBtn { background: #4CAF50; color: white; }
+  #nextBtn { background: #2196F3; color: white; }
+  #stopBtn { background: #f44336; color: white; }
+</style>
+</head>
+<body>
+
+<h1>🎥 شات فيديو عشوائي</h1>
+<div class="status" id="status">اضغط "بدء" للانطلاق</div>
+
+<div class="videos">
+  <video id="remoteVideo" autoplay playsinline></video>
+  <video id="localVideo" autoplay playsinline muted></video>
+</div>
+
+<div class="controls">
+  <button id="startBtn">بدء</button>
+  <button id="nextBtn" style="display:none">التالي ⏭️</button>
+  <button id="stopBtn" style="display:none">إيقاف ⏹️</button>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+const socket = io();
+const localVideo = document.getElementById('localVideo');
+const remoteVideo = document.getElementById('remoteVideo');
+const statusEl = document.getElementById('status');
+const startBtn = document.getElementById('startBtn');
+const nextBtn = document.getElementById('nextBtn');
+const stopBtn = document.getElementById('stopBtn');
+
+let localStream = null;
+let peerConnection = null;
+let isInitiator = false;
+
+const config = {
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' }
+  ]
+};
+
+async function startCamera() {
+  try {
+    localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    localVideo.srcObject = localStream;
+    return true;
+  } catch (err) {
+    statusEl.textContent = 'خاصك تسمح بالكاميرا والميكروفون';
+    return false;
+  }
+}
+
+function createPeerConnection() {
+  peerConnection = new RTCPeerConnection(config);
+
+  localStream.getTracks().forEach(track => {
+    peerConnection.addTrack(track, localStream);
+  });
+
+  peerConnection.ontrack = (event) => {
+    remoteVideo.srcObject = event.streams[0];
+  };
+
+  peerConnection.onicecandidate = (event) => {
+    if (event.candidate) {
+      socket.emit('signal', { type: 'candidate', candidate: event.candidate });
+    }
+  };
+}
+
+async function makeOffer() {
+  createPeerConnection();
+  const offer = await peerConnection.createOffer();
+  await peerConnection.setLocalDescription(offer);
+  socket.emit('signal', { type: 'offer', offer: offer });
+}
+
+startBtn.onclick = async () => {
+  const ok = await startCamera();
+  if (!ok) return;
+  startBtn.style.display = 'none';
+  stopBtn.style.display = 'inline-block';
+  statusEl.textContent = 'كنقلبو ليك على حد...';
+  socket.emit('find-partner');
+};
+
+nextBtn.onclick = () => {
+  cleanupConnection();
+  statusEl.textContent = 'كنقلبو ليك على حد جديد...';
+  socket.emit('next');
+  socket.emit('find-partner');
+};
+
+stopBtn.onclick = () => {
+  cleanupConnection();
+  if (localStream) {
+    localStream.getTracks().forEach(track => track.stop());
+    localStream = null;
+  }
+  localVideo.srcObject = null;
+  startBtn.style.display = 'inline-block';
+  nextBtn.style.display = 'none';
+  stopBtn.style.display = 'none';
+  statusEl.textContent = 'اضغط "بدء" للانطلاق';
+  socket.emit('next');
+};
+
+function cleanupConnection() {
+  if (peerConnection) {
+    peerConnection.close();
+    peerConnection = null;
+  }
+  remoteVideo.srcObject = null;
+}
+
+socket.on('waiting', () => {
+  statusEl.textContent = 'فالانتظار... قريبا نلقاو ليك حد';
+});
+
+socket.on('partner-found', async (data) => {
+  statusEl.textContent = 'تلاقاو! 🎉';
+  nextBtn.style.display = 'inline-block';
+  isInitiator = data.initiator;
+  if (isInitiator) {
+    await makeOffer();
+  }
+});
+
+socket.on('signal', async (data) => {
+  if (data.type === 'offer') {
+    createPeerConnection();
+    await peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer));
+    const answer = await peerConnection.createAnswer();
+    await peerConnection.setLocalDescription(answer);
+    socket.emit('signal', { type: 'answer', answer: answer });
+  } else if (data.type === 'answer') {
+    await peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
+  } else if (data.type === 'candidate') {
+    if (peerConnection) {
+      await peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
+    }
+  }
+});
+
+socket.on('partner-left', () => {
+  statusEl.textContent = 'الطرف الآخر خرج. كنقلبو على حد جديد...';
+  cleanupConnection();
+  socket.emit('find-partner');
+});
+</script>
+</body>
+  </html>
